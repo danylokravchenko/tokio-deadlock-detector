@@ -16,6 +16,16 @@ pub struct MonitoredMutexGuard<T> {
     owner: u64,
 }
 
+impl<T> MonitoredMutexGuard<T> {
+    pub fn owner(&self) -> u64 {
+        self.owner
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl<T> Drop for MonitoredMutexGuard<T> {
     fn drop(&mut self) {
         // remove Lock -> Task edge when guard is dropped
@@ -38,7 +48,7 @@ impl<T> MonitoredMutex<T> {
     /// Acquire the lock with instrumentation.
     pub async fn lock(&self) -> MonitoredMutexGuard<T> {
         // find current task id; if not set, use 0
-        let tid = CURRENT_TASK_ID.try_with(|id| id.get()).unwrap_or(0);
+        let tid = CURRENT_TASK_ID.try_with(|id| *id).unwrap_or(0);
 
         // record Task -> Lock (waiting)
         {
@@ -68,7 +78,7 @@ impl<T> MonitoredMutex<T> {
         // quick try without instrumentation
         if let Ok(guard) = self.inner.try_lock() {
             // we have a guard — no graph waiting; add ownership edge
-            let tid = CURRENT_TASK_ID.try_with(|id| id.get()).unwrap_or(0);
+            let tid = CURRENT_TASK_ID.try_with(|id| *id).unwrap_or(0);
             let mut g = GRAPH.lock();
             g.add_edge(Node::Lock(self.name.clone()), Node::Task(tid));
             // convert the guard into OwnedMutexGuard by dropping and re-locking owned?
@@ -76,26 +86,6 @@ impl<T> MonitoredMutex<T> {
             // For completeness, we'll drop guard and return None to avoid complexity.
             drop(guard);
             None
-        } else {
-            None
-        }
-    }
-
-    /// Non-blocking try_lock, returns Some(guard) if acquired
-    pub async fn try_lock_nowait(&self) -> Option<MonitoredMutexGuard<T>> {
-        // get task id
-        let tid = CURRENT_TASK_ID.try_with(|id| id.get()).unwrap_or(0);
-
-        if let Ok(owned) = self.inner.clone().try_lock_owned() {
-            // on acquire: add Lock->Task edge
-            let mut g = GRAPH.lock();
-            g.add_edge(Node::Lock(self.name.clone()), Node::Task(tid));
-
-            Some(MonitoredMutexGuard {
-                inner: owned,
-                name: self.name.clone(),
-                owner: tid,
-            })
         } else {
             None
         }
@@ -109,8 +99,25 @@ mod tests {
     use crate::monitor::CURRENT_TASK_ID;
     use tokio::task;
 
-    fn set_task_id(id: u64) {
-        CURRENT_TASK_ID.set(id);
+    // Instead of set_task_id, wrap your async block in scope
+    async fn run_with_task_id<F, R>(id: u64, fut: F) -> R
+    where
+        F: std::future::Future<Output = R>,
+    {
+        CURRENT_TASK_ID.scope(id, fut).await
+    }
+
+    async fn wait_for_task_edge(tid: u64, lock: &str) {
+        for _ in 0..20 {
+            if GRAPH
+                .lock()
+                .has_edge(&Node::Task(tid), &Node::Lock(lock.into()))
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("Task {} never added edge to lock {}", tid, lock);
     }
 
     #[tokio::test]
@@ -119,13 +126,12 @@ mod tests {
 
         let m = MonitoredMutex::new(TokioMutex::new(5usize), "L1");
 
-        task::spawn(async move {
-            set_task_id(1);
+        task::spawn(run_with_task_id(1, async move {
             let _g = m.lock().await;
 
             let g = GRAPH.lock();
             assert!(g.has_edge(&Node::Lock("L1".into()), &Node::Task(1)));
-        })
+        }))
         .await
         .unwrap();
     }
@@ -135,16 +141,14 @@ mod tests {
         GRAPH.lock().clear();
 
         let m = MonitoredMutex::new(TokioMutex::new(0usize), "Lx");
-
-        task::spawn(async move {
-            set_task_id(1);
+        task::spawn(run_with_task_id(1, async move {
             {
                 let _g = m.lock().await;
             }
 
             let g = GRAPH.lock();
             assert!(!g.has_any_edges_with(&Node::Lock("Lx".into())));
-        })
+        }))
         .await
         .unwrap();
     }
@@ -154,58 +158,26 @@ mod tests {
         GRAPH.lock().clear();
 
         let m = MonitoredMutex::new(TokioMutex::new(()), "Lw");
-
         // Acquire by task 1
         let g1 = m.clone();
-        let h1 = task::spawn(async move {
-            set_task_id(1);
+        task::spawn(run_with_task_id(1, async move {
             let _g = g1.lock().await;
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        });
+        }));
 
         // Allow T1 to acquire first
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Task 2 waits
         let g2 = m.clone();
-        let h2 = task::spawn(async move {
-            set_task_id(2);
+        task::spawn(run_with_task_id(2, async move {
             let _g = g2.lock().await;
-        });
+        }));
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
+        wait_for_task_edge(2, "Lw").await;
         let g = GRAPH.lock();
         assert!(g.has_edge(&Node::Task(2), &Node::Lock("Lw".into())));
-
-        h1.await.unwrap();
-        h2.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_try_lock_nowait() {
-        GRAPH.lock().clear();
-
-        let m = MonitoredMutex::new(TokioMutex::new(10usize), "Lt");
-
-        // First: acquire lock fully
-        let g1 = m.clone();
-        let h1 = task::spawn(async move {
-            set_task_id(1);
-            let _g = g1.lock().await;
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        });
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // try-lock should fail (and should not modify graph)
-        assert!(m.try_lock_nowait().await.is_none());
-
-        // check the graph: lock is owned by Task 1
-        let g = GRAPH.lock();
-        assert!(g.has_edge(&Node::Lock("Lt".into()), &Node::Task(1)));
-        assert_eq!(g.outgoing_count(&Node::Task(2)), 0); // no fake edges
-
-        h1.await.unwrap();
     }
 }

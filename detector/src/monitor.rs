@@ -1,16 +1,20 @@
-use std::{
-    cell::Cell, future::Future, pin::Pin, sync::Arc, task::{Context, Poll}, time::{SystemTime, UNIX_EPOCH}
-};
-use parking_lot::RwLock;
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use pin_project_lite::pin_project;
-use tokio::task::JoinHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::{task::JoinHandle, task_local};
 
-thread_local! {
+task_local! {
     /// task-local TaskId so instrumented locks can find current task.
     /// Note: we set this in spawn_monitored when spawning the task.
-    pub static CURRENT_TASK_ID: Cell<TaskId> = Cell::new(0);
+    pub static CURRENT_TASK_ID: TaskId;
 }
 
 /// Cheap monotonic-ish timestamp in milliseconds since program start (not wall-clock).
@@ -40,8 +44,7 @@ pub struct TaskInfo {
 
 impl TaskInfo {
     fn touch(&self) {
-        self.last_progress_ms
-            .store(now_millis(), Ordering::Release);
+        self.last_progress_ms.store(now_millis(), Ordering::Release);
     }
 }
 
@@ -65,7 +68,9 @@ struct RegistryInner {
 
 impl RegistryInner {
     fn new() -> Self {
-        Self { tasks: Default::default() }
+        Self {
+            tasks: Default::default(),
+        }
     }
 }
 
@@ -160,8 +165,8 @@ impl<F: Future + Send + 'static> Future for MonitorFuture<F> {
             *this.task_id = id;
         }
 
-        crate::monitor::CURRENT_TASK_ID.with( |id_cell| {
-            id_cell.set(*this.task_id);
+        let task_id = *this.task_id;
+        crate::monitor::CURRENT_TASK_ID.sync_scope(task_id, || {
             // increment polls and touch timestamp
             this.info.polls.fetch_add(1, Ordering::Relaxed);
             this.info.touch();
@@ -172,7 +177,7 @@ impl<F: Future + Send + 'static> Future for MonitorFuture<F> {
                 Poll::Ready(output) => {
                     // Task just completed — mark progress and deregister to avoid later false positives.
                     let id = *this.task_id;
-                    REGISTRY.touch(id);     // update last_progress to now
+                    REGISTRY.touch(id); // update last_progress to now
                     REGISTRY.deregister(id); // remove from registry so watchdog won't see it later
                     Poll::Ready(output)
                 }
@@ -261,7 +266,9 @@ where
             let now = now_millis();
             let stalled: Vec<TaskInfo> = snap
                 .into_iter()
-                .filter(|t| now.saturating_sub(t.last_progress_ms.load(Ordering::Acquire)) > stall_ms)
+                .filter(|t| {
+                    now.saturating_sub(t.last_progress_ms.load(Ordering::Acquire)) > stall_ms
+                })
                 .collect();
             if !stalled.is_empty() {
                 on_stall(stalled);
@@ -273,7 +280,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
+    use serial_test::serial;
+    use tokio::time::{Duration, sleep};
 
     /// Reset the registry before each test.
     fn clear_registry() {
@@ -282,6 +290,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_registry_register_and_snapshot() {
         clear_registry();
 
@@ -294,21 +303,31 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_registry_touch_updates_timestamp() {
         clear_registry();
 
         let info = TaskInfo::default();
         let id = REGISTRY.register(info.clone());
-        let before = REGISTRY.get(id).unwrap().last_progress_ms.load(Ordering::Acquire);
+        let before = REGISTRY
+            .get(id)
+            .unwrap()
+            .last_progress_ms
+            .load(Ordering::Acquire);
 
         tokio::time::sleep(Duration::from_millis(5)).await;
         REGISTRY.touch(id);
 
-        let after = REGISTRY.get(id).unwrap().last_progress_ms.load(Ordering::Acquire);
+        let after = REGISTRY
+            .get(id)
+            .unwrap()
+            .last_progress_ms
+            .load(Ordering::Acquire);
         assert!(after > before);
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_registry_deregister() {
         clear_registry();
 
@@ -322,6 +341,7 @@ mod tests {
     // ---- MonitorFuture -------------------------------------------------------
 
     #[tokio::test]
+    #[serial]
     async fn test_monitorfuture_counts_polls_and_deregisters() {
         clear_registry();
 
@@ -344,6 +364,7 @@ mod tests {
     // ---- spawn_monitored -----------------------------------------------------
 
     #[tokio::test]
+    #[serial]
     async fn test_spawn_monitored_registers_and_deregisters() {
         clear_registry();
 
@@ -370,6 +391,7 @@ mod tests {
     // ---- spawn_blocking_monitored -------------------------------------------
 
     #[tokio::test]
+    #[serial]
     async fn test_spawn_blocking_monitored() {
         clear_registry();
 
@@ -393,6 +415,7 @@ mod tests {
     // ---- init_watchdog -------------------------------------------------------
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
     async fn test_watchdog_detects_stalled_tasks() {
         clear_registry();
 
