@@ -242,7 +242,6 @@ where
         // touch at start
         REGISTRY.touch(id);
         let res = f();
-        println!("Task was complete");
         // touch on complete
         REGISTRY.touch(id);
         // then remove from registry to avoid false alarms

@@ -8,12 +8,14 @@ use detector::{
     watchdog,
 };
 use detector_macros::monitored;
+use serial_test::serial;
 use tokio::{
     task::JoinHandle,
     time::{Duration, sleep},
 };
 
 #[tokio::test]
+#[serial]
 async fn test_spawn_monitored_progress_and_watchdog() {
     // callback collects stalled tasks
     let captured: std::sync::Arc<std::sync::Mutex<Vec<Vec<TaskInfo>>>> =
@@ -54,6 +56,7 @@ async fn test_spawn_monitored_progress_and_watchdog() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_spawn_blocking_monitored_registers() {
     #[monitored]
     fn task_blocker() -> JoinHandle<String> {
@@ -75,6 +78,7 @@ async fn test_spawn_blocking_monitored_registers() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_spawn_monitored_registers() {
     #[monitored]
     async fn task_blocker() -> JoinHandle<String> {
@@ -97,6 +101,7 @@ async fn test_spawn_monitored_registers() {
 
 #[cfg(feature = "deadlock")]
 #[tokio::test]
+#[serial]
 async fn test_macro_and_monitored_mutex_integration() {
     // Two mutexes to induce deadlock
     let m1 = Arc::new(MonitoredMutex::new(tokio::sync::Mutex::new(()), "m1"));
@@ -164,4 +169,64 @@ async fn test_macro_and_monitored_mutex_integration() {
     // Abort tasks to clean up
     GRAPH.lock().clear_edges_from(&Node::Lock("m1".to_string()));
     GRAPH.lock().clear_edges_from(&Node::Lock("m2".to_string()));
+}
+
+#[tokio::test]
+#[serial]
+async fn test_macro_rewrites_spawn_import() {
+    use detector::monitor::REGISTRY;
+    #[allow(unused)]
+    use tokio::spawn;
+    #[monitored]
+    async fn spawn_task() -> tokio::task::JoinHandle<&'static str> {
+        let handle = spawn(async { "rewritten_spawn" });
+        handle
+    }
+    let handle = spawn_task().await;
+    let snap = REGISTRY.snapshot();
+    let r = handle.await.unwrap();
+    assert_eq!(r, "rewritten_spawn");
+    assert_eq!(snap.len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_macro_rewrites_spawn_blocking_alias() {
+    use detector::monitor::REGISTRY;
+    #[monitored]
+    fn spawn_blocking_task() -> tokio::task::JoinHandle<&'static str> {
+        #[allow(unused)]
+        use tokio::task::spawn_blocking as spawn_b;
+        let handle = spawn_b(|| "rewritten_blocking");
+        handle
+    }
+    let handle = spawn_blocking_task();
+    let snap = REGISTRY.snapshot();
+    let r = handle.await.unwrap();
+    assert_eq!(r, "rewritten_blocking");
+    assert_eq!(snap.len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_macro_rewrites_explicit_paths() {
+    use detector::monitor::REGISTRY;
+    #[monitored]
+    async fn explicit_spawn_task() -> tokio::task::JoinHandle<&'static str> {
+        let handle = tokio::spawn(async { "explicit_path" });
+        handle
+    }
+    #[monitored]
+    fn explicit_spawn_blocking_task() -> tokio::task::JoinHandle<&'static str> {
+        let handle = tokio::task::spawn_blocking(|| "explicit_blocking");
+        handle
+    }
+    let handle1 = explicit_spawn_task().await;
+    let handle2 = explicit_spawn_blocking_task();
+    let snap = REGISTRY.snapshot();
+    let r1 = handle1.await.unwrap();
+    assert_eq!(r1, "explicit_path");
+    let r2 = handle2.await.unwrap();
+    assert_eq!(r2, "explicit_blocking");
+    assert!(snap.len() >= 2);
 }

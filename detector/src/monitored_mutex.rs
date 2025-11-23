@@ -111,6 +111,7 @@ mod tests {
     use super::*;
     use crate::graph::{GRAPH, Node};
     use crate::monitor::CURRENT_TASK_ID;
+    use serial_test::serial;
     use tokio::task;
 
     // Instead of set_task_id, wrap your async block in scope
@@ -135,6 +136,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_lock_adds_wait_and_acquire_edges() {
         GRAPH.lock().clear();
 
@@ -151,6 +153,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_drop_removes_edges() {
         GRAPH.lock().clear();
 
@@ -168,6 +171,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_two_tasks_wait_on_same_mutex_order_preserved() {
         GRAPH.lock().clear();
 

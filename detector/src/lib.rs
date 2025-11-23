@@ -16,12 +16,14 @@ pub use watchdog::init_deadlock_watchdog;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::{Arc, Mutex as StdMutex};
     #[cfg(feature = "deadlock")]
     use tokio::time::timeout;
     use tokio::time::{Duration, sleep};
 
     #[tokio::test]
+    #[serial]
     async fn short_task_not_reported_as_stalled() {
         let captured: Arc<StdMutex<Vec<Vec<monitor::TaskInfo>>>> = Arc::new(StdMutex::new(vec![]));
         let c2 = captured.clone();
@@ -55,6 +57,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_spawn_blocking_monitored_registers() {
         let handle = spawn_blocking_monitored("blocker", || {
             // simulate blocking work
@@ -73,6 +76,7 @@ mod tests {
 
     #[cfg(feature = "deadlock")]
     #[tokio::test]
+    #[serial]
     async fn detect_deadlock_two_mutexes() {
         // create two monitored mutexes
         let m1 = Arc::new(MonitoredMutex::new(tokio::sync::Mutex::new(()), "m1"));
