@@ -116,22 +116,28 @@ async fn test_macro_and_monitored_mutex_integration() {
 
     // Macro-generated tasks using your procedural macro
     #[monitored]
-    async fn task_a(m1: Arc<MonitoredMutex<()>>, m2: Arc<MonitoredMutex<()>>) {
-        let _g1 = m1.lock().await;
-        sleep(Duration::from_millis(20)).await;
-        let _g2 = m2.lock().await;
+    async fn task_a(m1: Arc<MonitoredMutex<()>>, m2: Arc<MonitoredMutex<()>>) -> JoinHandle<()> {
+        let handle = tokio::spawn(async move {
+            let _g1 = m1.lock().await;
+            sleep(Duration::from_millis(20)).await;
+            let _g2 = m2.lock().await;
+        });
+        handle
     }
 
     #[monitored]
-    async fn task_b(m1: Arc<MonitoredMutex<()>>, m2: Arc<MonitoredMutex<()>>) {
-        let _g1 = m2.lock().await;
-        sleep(Duration::from_millis(20)).await;
-        let _g2 = m1.lock().await;
+    async fn task_b(m1: Arc<MonitoredMutex<()>>, m2: Arc<MonitoredMutex<()>>) -> JoinHandle<()> {
+        let handle = tokio::spawn(async move {
+            let _g1 = m2.lock().await;
+            sleep(Duration::from_millis(20)).await;
+            let _g2 = m1.lock().await;
+        });
+        handle
     }
 
     // Spawn macro-generated tasks
-    let _h1 = task_a(m1.clone(), m2.clone());
-    let _h2 = task_b(m1.clone(), m2.clone());
+    let _h1 = task_a(m1.clone(), m2.clone()).await;
+    let _h2 = task_b(m1.clone(), m2.clone()).await;
 
     // Wait for deadlock detection (up to 2 seconds)
     tokio::time::timeout(Duration::from_secs(2), async {
