@@ -1,9 +1,12 @@
 #[cfg(feature = "deadlock")]
 use std::sync::{Arc, Mutex as StdMutex};
 
-use detector::monitor::{REGISTRY, TaskInfo, init_watchdog, spawn_monitored};
 #[cfg(feature = "deadlock")]
-use detector::{GRAPH, MonitoredMutex, Node, init_deadlock_watchdog};
+use detector::{GRAPH, MonitoredMutex, Node};
+use detector::{
+    monitor::{REGISTRY, TaskInfo, spawn_monitored},
+    watchdog,
+};
 use detector_macros::monitored;
 use tokio::{
     task::JoinHandle,
@@ -18,10 +21,14 @@ async fn test_spawn_monitored_progress_and_watchdog() {
     let cap_clone = captured.clone();
 
     // start watchdog: stall threshold 200 ms, sample every 50ms
-    let _hdl = init_watchdog(200, 50, move |stalled| {
-        let mut guard = cap_clone.lock().unwrap();
-        guard.push(stalled);
-    });
+    let _w = watchdog::WatchdogBuilder::new()
+        .stall_threshold_ms(200)
+        .sample_interval_ms(50)
+        .on_stall(move |stalled| {
+            let mut guard = cap_clone.lock().unwrap();
+            guard.push(stalled);
+        })
+        .start();
 
     let handle = spawn_monitored("short", async {
         // yield a couple times and finish quickly
@@ -100,19 +107,22 @@ async fn test_macro_and_monitored_mutex_integration() {
     let det_clone = detected.clone();
 
     // Start deadlock watchdog
-    let _hdl = init_deadlock_watchdog(50, move |tasks, cycle| {
-        for info in tasks {
-            println!(
-                "Deadlock detected! Task: {}, Location: {:?}, Polls: {}, Cycle: {:?}",
-                info.name,
-                info.location,
-                info.polls.load(std::sync::atomic::Ordering::Acquire),
-                cycle
-            );
-        }
-        let mut d = det_clone.lock().unwrap();
-        *d = true;
-    });
+    let _w = watchdog::WatchdogBuilder::new()
+        .sample_interval_ms(50)
+        .on_deadlock(move |tasks, cycle| {
+            for info in tasks {
+                println!(
+                    "Deadlock detected! Task: {}, Location: {:?}, Polls: {}, Cycle: {:?}",
+                    info.name,
+                    info.location,
+                    info.polls.load(std::sync::atomic::Ordering::Acquire),
+                    cycle
+                );
+            }
+            let mut d = det_clone.lock().unwrap();
+            *d = true;
+        })
+        .start();
 
     // Macro-generated tasks using your procedural macro
     #[monitored]

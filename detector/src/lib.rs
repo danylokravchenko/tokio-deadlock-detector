@@ -1,14 +1,13 @@
-pub mod monitor;
 #[cfg(feature = "deadlock")]
 pub mod graph;
+pub mod monitor;
 #[cfg(feature = "deadlock")]
 pub mod monitored_mutex;
-#[cfg(feature = "deadlock")]
 pub mod watchdog;
 
-pub use monitor::{spawn_monitored, spawn_blocking_monitored, init_watchdog, REGISTRY, CURRENT_TASK_ID};
 #[cfg(feature = "deadlock")]
 pub use graph::{GRAPH, Node};
+pub use monitor::{CURRENT_TASK_ID, REGISTRY, spawn_blocking_monitored, spawn_monitored};
 #[cfg(feature = "deadlock")]
 pub use monitored_mutex::MonitoredMutex;
 #[cfg(feature = "deadlock")]
@@ -17,10 +16,10 @@ pub use watchdog::init_deadlock_watchdog;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
+    use std::sync::{Arc, Mutex as StdMutex};
     #[cfg(feature = "deadlock")]
     use tokio::time::timeout;
-    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test]
     async fn short_task_not_reported_as_stalled() {
@@ -28,10 +27,14 @@ mod tests {
         let c2 = captured.clone();
 
         // Start simple watchdog for stalls (not deadlock watcher) to ensure registry behavior is OK.
-        let _w = monitor::init_watchdog(200, 50, move |stalled| {
-            let mut g = c2.lock().unwrap();
-            g.push(stalled);
-        });
+        let _w = watchdog::WatchdogBuilder::new()
+            .stall_threshold_ms(200)
+            .sample_interval_ms(50)
+            .on_stall(move |stalled| {
+                let mut g = c2.lock().unwrap();
+                g.push(stalled);
+            })
+            .start();
 
         // spawn short task
         let h = spawn_monitored("short_task", async {
@@ -126,7 +129,8 @@ mod tests {
                 }
                 sleep(Duration::from_millis(20)).await;
             }
-        }).await;
+        })
+        .await;
 
         assert!(res.is_ok(), "deadlock should be detected within timeout");
 

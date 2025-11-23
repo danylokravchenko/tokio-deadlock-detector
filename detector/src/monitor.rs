@@ -18,7 +18,7 @@ task_local! {
 }
 
 /// Cheap monotonic-ish timestamp in milliseconds since program start (not wall-clock).
-fn now_millis() -> u64 {
+pub fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -251,34 +251,10 @@ where
     })
 }
 
-/// Initialize watchdog background task; returns the JoinHandle so caller can keep/stop it.
-/// `stall_ms` — threshold in milliseconds to consider a task stalled.
-/// `sample_interval_ms` — how often to check.
-pub fn init_watchdog<F>(stall_ms: u64, sample_interval_ms: u64, mut on_stall: F) -> JoinHandle<()>
-where
-    F: FnMut(Vec<TaskInfo>) + Send + 'static,
-{
-    tokio::spawn(async move {
-        let interval = tokio::time::Duration::from_millis(sample_interval_ms.max(10));
-        loop {
-            tokio::time::sleep(interval).await;
-            let snap = REGISTRY.snapshot();
-            let now = now_millis();
-            let stalled: Vec<TaskInfo> = snap
-                .into_iter()
-                .filter(|t| {
-                    now.saturating_sub(t.last_progress_ms.load(Ordering::Acquire)) > stall_ms
-                })
-                .collect();
-            if !stalled.is_empty() {
-                on_stall(stalled);
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::watchdog;
+
     use super::*;
     use serial_test::serial;
     use tokio::time::{Duration, sleep};
@@ -434,12 +410,15 @@ mod tests {
         let triggered = Arc::new(AtomicU64::new(0));
         let triggered_c = triggered.clone();
 
-        // stall_ms = 50 ms, interval = 10 ms
-        let _watchdog = init_watchdog(50, 10, move |stalled| {
-            assert_eq!(stalled.len(), 1);
-            assert_eq!(stalled[0].id, id);
-            triggered_c.fetch_add(1, Ordering::Relaxed);
-        });
+        let _wd = watchdog::WatchdogBuilder::new()
+            .stall_threshold_ms(50)
+            .sample_interval_ms(10)
+            .on_stall(move |stalled| {
+                assert_eq!(stalled.len(), 1);
+                assert_eq!(stalled[0].id, id);
+                triggered_c.fetch_add(1, Ordering::Relaxed);
+            })
+            .start();
 
         sleep(Duration::from_millis(60)).await;
 

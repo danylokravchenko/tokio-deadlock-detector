@@ -1,5 +1,6 @@
 use crate::graph::{GRAPH, Node};
 use crate::monitor::CURRENT_TASK_ID;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tokio::sync::{Mutex as TokioMutex, OwnedMutexGuard};
 
@@ -23,6 +24,19 @@ impl<T> MonitoredMutexGuard<T> {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+}
+
+impl<T> Deref for MonitoredMutexGuard<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
+
+impl<T> DerefMut for MonitoredMutexGuard<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.inner
     }
 }
 
