@@ -1,0 +1,13 @@
+[package]
+name = "detector"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+deadlock = []
+
+[dependencies]
+once_cell = "1.21.3"
+parking_lot = "0.12.5"
+pin-project-lite = "0.2.16"
+tokio = { workspace = true }
