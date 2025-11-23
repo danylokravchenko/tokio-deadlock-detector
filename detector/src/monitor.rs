@@ -196,7 +196,7 @@ where
     F::Output: Send + 'static,
 {
     let loc = std::panic::Location::caller();
-    let mut info = TaskInfo {
+    let info = TaskInfo {
         id: 0,
         name: name.into(),
         polls: Arc::new(AtomicU64::new(0)),
@@ -205,14 +205,16 @@ where
         is_blocking: false,
     };
 
-    // Register immediately and get an id
+    // Register immediately and get a unique id
     let id = REGISTRY.register(info.clone());
-    // ensure the info has id for MonitorFuture as well
-    info.id = id;
+    let info = TaskInfo { id, ..info };
 
-    // Pass the id into MonitorFuture so we don't register lazily
-    let mon = MonitorFuture::new(fut, id, info);
-    tokio::spawn(mon)
+    // Set CURRENT_TASK_ID for this task
+    tokio::spawn(async move {
+        crate::monitor::CURRENT_TASK_ID
+            .scope(id, MonitorFuture::new(fut, id, info))
+            .await
+    })
 }
 
 /// Spawn a monitored blocking task (spawn_blocking).
@@ -237,16 +239,17 @@ where
 
     // Register immediately before spawn_blocking to ensure we know the task exists.
     let id = REGISTRY.register(info.clone());
-    // spawn_blocking closure will touch timestamp on start, and deregister on complete.
     tokio::task::spawn_blocking(move || {
-        // touch at start
-        REGISTRY.touch(id);
-        let res = f();
-        // touch on complete
-        REGISTRY.touch(id);
-        // then remove from registry to avoid false alarms
-        REGISTRY.deregister(id);
-        res
+        crate::monitor::CURRENT_TASK_ID.sync_scope(id, || {
+            // touch at start
+            REGISTRY.touch(id);
+            let res = f();
+            // touch on complete
+            REGISTRY.touch(id);
+            // then remove from registry to avoid false alarms
+            REGISTRY.deregister(id);
+            res
+        })
     })
 }
 
@@ -395,7 +398,7 @@ mod tests {
         clear_registry();
 
         // Register a task with an artificially old timestamp
-        let info = TaskInfo {
+        let mut info = TaskInfo {
             id: 0,
             name: "stall-me".into(),
             polls: Arc::new(AtomicU64::new(0)),
@@ -405,6 +408,7 @@ mod tests {
         };
 
         let id = REGISTRY.register(info.clone());
+        info.id = id;
 
         let triggered = Arc::new(AtomicU64::new(0));
         let triggered_c = triggered.clone();
@@ -415,6 +419,7 @@ mod tests {
             .on_stall(move |stalled| {
                 assert_eq!(stalled.len(), 1);
                 assert_eq!(stalled[0].id, id);
+                assert_eq!(stalled[0].name, "stall-me");
                 triggered_c.fetch_add(1, Ordering::Relaxed);
             })
             .start();

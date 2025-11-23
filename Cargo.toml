@@ -1,16 +1,24 @@
+[package]
+name = "tokio-deadlock-detector"
+description = "Detect stalls and deadlocks in the tokio async runtime"
+authors = ["Danylo Kravchenko"]
+edition = "2024"
+license-file = "LICENSE"
+
+[features]
+deadlock = []
+
+[dependencies]
+detector = { path = "./detector", features = ["deadlock"] }
+detector-macros = { path = "./detector-macros", features = ["deadlock"] }
+tokio = { workspace = true }
+
 [workspace]
 resolver = "3"
 members = [
   "detector",
   "detector-macros",
 ]
-
-[workspace.package]
-name = "tokio-deadlock-detector"
-description = "Detect stalls and deadlocks in the tokio async runtime"
-authors = ["Danylo Kravchenko"]
-edition = "2024"
-license-file = "LICENSE"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
