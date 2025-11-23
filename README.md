@@ -28,7 +28,7 @@ use detector_macros::monitored;
 #[monitored]
 async fn my_task() -> String {
     tokio::spawn(async {
-        tokio::time::sleepsleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         "ok".to_string()
     }).await
 }
@@ -38,7 +38,10 @@ fn main() {
         .stall_threshold_ms(200)
         .sample_interval_ms(50)
         .on_stall(move |stalled| {
-            // task was stalled
+            // my_task was stalled
+            if let Some(handle) = handles.get(&stalled.id) { // in case you have access to the handle
+                handle.abort();
+            }
         })
         .start();
     my_task().await;
@@ -82,6 +85,10 @@ fn main() {
                     info.polls.load(std::sync::atomic::Ordering::Acquire),
                     cycle
                 );
+                // abort the task
+                if let Some(handle) = handles.get(&info.id) {
+                    handle.abort();
+                }
             }
         })
         .start();
